@@ -1,0 +1,116 @@
+from vertexai.preview.generative_models import GenerativeModel
+from vertexai.language_models import TextEmbeddingModel
+text_embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
+model = GenerativeModel('gemini-pro')
+
+import urllib.request
+
+# download alphabet's annual pdf report
+url = "https://abc.xyz/assets/d4/4f/a48b94d548d0b2fdc029a95e8c63"
+file = "2022-alphabet-annual-report.pdf"
+
+urllib.request.urlretrieve(f"{url}/{file}", filename=f"{file}")
+
+!pip install PyPDF2
+import PyPDF2
+
+# Open the PDF file in binary mode
+with open('2022-alphabet-annual-report.pdf', 'rb') as file:
+    # Create a PdfFileReader object
+    pdf_reader = PyPDF2.PdfReader(file)
+    pdf_texts = [p.extract_text().strip() for p in pdf_reader.pages]
+
+    # Filter the empty strings
+    pdf_texts = [text for text in pdf_texts if text]
+
+    print(pdf_texts[0])
+
+!pip install langchain sentence-transformers
+from langchain.text_splitter import RecursiveCharacterTextSplitter, SentenceTransformersTokenTextSplitter
+character_splitter = RecursiveCharacterTextSplitter(
+    separators=["\n\n", "\n", ". ", " ", ""],
+    chunk_size=1000,
+    chunk_overlap=0
+)
+character_split_texts = character_splitter.split_text('\n\n'.join(pdf_texts))
+
+print(character_split_texts[10])
+print(f"\nTotal chunks: {len(character_split_texts)}")
+
+token_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=0, tokens_per_chunk=256)
+
+token_split_texts = []
+for text in character_split_texts:
+    token_split_texts += token_splitter.split_text(text)
+
+print(token_split_texts[10])
+print(f"\nTotal chunks: {len(token_split_texts)}")
+
+!pip3 install chromadb==0.5.3
+!pip3 install google-generativeai
+import chromadb
+import os
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+# import chromadb.utils.embedding_functions as embedding_functions
+
+# import getpass
+# import os
+
+# getpass will prompt for an API Key
+# The API Key is needed for Chroma DB
+# API_KEY = getpass.getpass("Provide your Google API Key")
+
+# embedding_function = embedding_functions.GooglePalmEmbeddingFunction(api_key=creds.token)
+
+embedding_function = SentenceTransformerEmbeddingFunction()
+print(embedding_function([token_split_texts[10]]))
+
+
+chroma_client = chromadb.Client()
+print("collection")
+chroma_collection = chroma_client.create_collection("alphabet_annual_report_2022", embedding_function=embedding_function)
+print("created")
+ids = [str(i) for i in range(len(token_split_texts))]
+print("adding")
+chroma_collection.add(ids=ids, documents=token_split_texts)
+chroma_collection.count()
+
+query = "What was the total revenue?"
+
+results = chroma_collection.query(query_texts=[query], n_results=5)
+retrieved_documents = results['documents'][0]
+
+for document in retrieved_documents:
+    print(document)
+    print('\n')
+
+def rag(query, retrieved_documents, model):
+    information = "\n\n".join(retrieved_documents)
+
+    prompt = (f'You are a helpful expert financial research assistant.\n'
+    f'Your users are asking questions about information contained in an annual report.\n'
+    f'You will be shown the user\'s question, and the relevant information from the annual report.\n'
+    f'Answer the user\'s question using only this information.\n\n'
+    f'Question: {query}. \n Information: {information}')
+    
+    responses = model.generate_content(prompt, stream=False)
+    return responses.text
+
+response = rag(query=query, retrieved_documents=retrieved_documents, model=model)
+print(response)
+
+import umap.umap_ as umap
+import numpy as np
+from tqdm import tqdm
+
+embeddings = chroma_collection.get(include=['embeddings'])['embeddings']
+umap_transform = umap.UMAP(random_state=0, transform_seed=0).fit(embeddings)
+
+def project_embeddings(embeddings, umap_transform):
+    umap_embeddings = np.empty((len(embeddings),2))
+    for i, embedding in enumerate(tqdm(embeddings)): 
+        umap_embeddings[i] = umap_transform.transform([embedding])
+    return umap_embeddings
+
+projected_dataset_embeddings = project_embeddings(embeddings, umap_transform)
+
